@@ -11,13 +11,18 @@ https://arxiv.org/abs/2211.17192
 Key idea
 --------
 Instead of calling the large target model once per token, we:
-  1. Use the small draft model to auto-regressively propose K tokens cheaply.
+  1. Use the small draft model to greedily propose K tokens cheaply.
   2. Feed the original context + all K draft tokens into the target model in
      ONE forward pass (the target processes all positions in parallel).
-  3. Accept or reject each draft token via rejection sampling, which
-     guarantees the final distribution is identical to target-only generation.
-  4. If a token is rejected, resample from a corrected distribution and
-     discard all subsequent draft tokens.
+  3. Accept each draft token deterministically: if the target's greedy choice
+     at that position matches the draft token, accept; otherwise take the
+     target's choice and discard all subsequent draft tokens.
+  4. When all K tokens are accepted, take a free bonus token from the target's
+     final position — giving K+1 tokens for one target call.
+
+Using greedy (argmax) decoding in both models guarantees that the speculative
+output is bit-for-bit identical to target-only greedy generation, which makes
+token match rate verifiable and deterministic.
 
 This typically achieves 2-3x wall-clock speedup because:
   - The target model's forward pass cost scales sub-linearly with extra tokens
@@ -27,7 +32,6 @@ This typically achieves 2-3x wall-clock speedup because:
 
 import os
 import torch
-import numpy as np
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
 
 DRAFT_MODEL_PATH  = os.getenv("DRAFT_MODEL_PATH",  "/models/gpt2-small")
@@ -76,22 +80,20 @@ def speculative_decode(
     seed: int = 42,
 ) -> str:
     """
-    Generate text using speculative decoding.
+    Generate text using speculative decoding (greedy).
 
     Parameters
     ----------
     prompt         : Input text string.
     max_new_tokens : How many new tokens to generate beyond the prompt.
     K              : Speculation length — tokens proposed per draft round.
-    seed           : Random seed for reproducibility.
+    seed           : Unused (kept for API compatibility; decoding is deterministic).
 
     Returns
     -------
     Full string: prompt + generated continuation.
     """
     _load_models()
-    torch.manual_seed(seed)
-    np.random.seed(seed)
 
     device    = next(_target_model.parameters()).device
     input_ids = _tokenizer.encode(prompt, return_tensors="pt").to(device)
@@ -103,19 +105,13 @@ def speculative_decode(
         remaining = max_new_tokens - n_generated
         k = min(K, remaining)
 
-        # Step 1: Draft model proposes k tokens autoregressively (cheap)
-        # Store full distributions (not just chosen-token scalar) for correct
-        # rejection-sampling correction: normalize(max(0, p_target - p_draft))
-        draft_ids   = []
-        draft_dists = []  # full vocab distributions, shape (vocab_size,) each
+        # Step 1: Draft model greedily proposes k tokens (cheap, sequential)
+        draft_ids = []
         ctx = generated.clone()
-
         for _ in range(k):
             logits     = _get_logits(_draft_model, ctx)
-            probs      = torch.softmax(logits[:, -1, :], dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)
+            next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
             draft_ids.append(next_token.item())
-            draft_dists.append(probs[0])  # full distribution over vocab
             ctx = torch.cat([ctx, next_token], dim=-1)
 
         # Step 2: Target model verifies ALL k tokens in ONE forward pass
@@ -124,40 +120,25 @@ def speculative_decode(
         all_logits   = _get_logits(_target_model, full_ctx)
         base_pos     = generated.shape[1] - 1
 
-        # Step 3: Rejection sampling
-        # Accept/reject each draft token; on rejection sample corrected distribution
+        # Step 3: Deterministic acceptance
+        # Accept if target's greedy choice matches the draft; else take target's
+        # choice and end the round (discard remaining draft tokens).
         accepted = 0
-
         for i in range(k):
-            tgt_probs = torch.softmax(all_logits[:, base_pos + i, :], dim=-1)
-            token_id  = draft_ids[i]
-            p_target  = tgt_probs[0, token_id].item()
-            p_draft   = draft_dists[i][token_id].item()
-
-            u = torch.rand(1).item()
-            if u <= min(1.0, p_target / (p_draft + 1e-10)):
-                # Accept
-                generated   = torch.cat([generated, torch.tensor([[token_id]], device=device)], dim=-1)
-                accepted    += 1
-                n_generated += 1
+            target_token = all_logits[:, base_pos + i, :].argmax(dim=-1).item()
+            generated    = torch.cat([generated, torch.tensor([[target_token]], device=device)], dim=-1)
+            n_generated += 1
+            if target_token == draft_ids[i]:
+                accepted += 1
                 if n_generated >= max_new_tokens:
                     break
             else:
-                # Reject: resample from corrected distribution
-                # Subtract full draft dist from target dist, clamp negatives to 0
-                corrected = torch.clamp(tgt_probs[0] - draft_dists[i], min=0.0)
-                s = corrected.sum()
-                corrected = corrected / s if s > 0 else tgt_probs[0]
-                token     = torch.multinomial(corrected, num_samples=1)
-                generated   = torch.cat([generated, token.unsqueeze(0)], dim=-1)
-                n_generated += 1
                 break
 
-        # Bonus token when all k draft tokens accepted (standard protocol)
+        # Bonus token when all k draft tokens were accepted (K+1 tokens per call)
         if accepted == k and n_generated < max_new_tokens:
-            bonus_probs = torch.softmax(all_logits[:, base_pos + k, :], dim=-1)
-            bonus_token = torch.multinomial(bonus_probs, num_samples=1)
-            generated   = torch.cat([generated, bonus_token], dim=-1)
+            bonus_token = all_logits[:, base_pos + k, :].argmax(dim=-1).item()
+            generated   = torch.cat([generated, torch.tensor([[bonus_token]], device=device)], dim=-1)
             n_generated += 1
 
     return _tokenizer.decode(generated[0], skip_special_tokens=True)

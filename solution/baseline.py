@@ -36,9 +36,8 @@ def baseline_decode(
     max_new_tokens: int = 50,
     seed: int = 42,
 ) -> str:
-    """Standard autoregressive generation using only the target model."""
+    """Standard autoregressive greedy generation using only the target model."""
     _load()
-    torch.manual_seed(seed)
     device    = next(_model.parameters()).device
     input_ids = _tokenizer.encode(prompt, return_tensors="pt").to(device)
     generated = input_ids.clone()
@@ -46,8 +45,7 @@ def baseline_decode(
     for _ in range(max_new_tokens):
         with torch.no_grad():
             logits = _model(generated).logits[:, -1, :]
-        probs      = torch.softmax(logits, dim=-1)
-        next_token = torch.multinomial(probs, num_samples=1)
+        next_token = logits.argmax(dim=-1, keepdim=True)
         generated  = torch.cat([generated, next_token], dim=-1)
 
     return _tokenizer.decode(generated[0], skip_special_tokens=True)
