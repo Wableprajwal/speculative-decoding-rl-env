@@ -7,3 +7,4 @@ dist/
 build/
 .env
 speedup_results.png
+data/eval_prompts.txt

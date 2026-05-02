@@ -89,7 +89,7 @@ def speculative_decode(
 |------|-------|-------------------|
 | 1 | File exists | `/solution/speculative_decoding.py` missing |
 | 2 | Import + signature | Import error or wrong parameters |
-| 3 | Correctness | Token match rate < 95% on 100 hidden prompts |
+| 3 | Correctness | Token match rate < 95% on 100 prompts embedded in judge |
 | 4 | Speed | Speedup < 1.5× vs. baseline |
 
 **Continuous score (if all checks pass):**
@@ -103,25 +103,30 @@ final_score       = 0.6 * correctness_score + 0.4 * speedup_score
 
 | Potential hack | Why it fails |
 |---|---|
-| Hardcode outputs | Judge uses 100 hidden, unseen prompts |
-| Skip draft model (run target only) | Passes correctness, **fails speedup gate** |
+| Hardcode lookup table | Judge prompts are embedded in `judge.py`, not in any readable data file. In deployment, `judge.py` runs in a restricted VM directory the LLM cannot access. Speedup >50x also triggers the sanity-check gate. |
+| Skip draft model (run target only) | Passes correctness, **fails speedup gate (< 1.5x)** |
 | Skip target model (run draft only) | Passes speed, **fails 95% correctness gate** |
-| Call target K times instead of once | Correct output but no speedup → **fails** |
+| Call target K times instead of once | Correct output but no speedup → **fails speedup gate** |
+| Cache/precompute outputs | Runs near-instantly → **fails sanity gate (> 50x)** |
 
 **Key design:** Correctness and speed are in fundamental tension — the only
 path to a high score is implementing the algorithm correctly.
 
 ## Core Algorithm
 
+This environment uses **greedy (argmax) decoding** in both the draft and target models.
+Greedy acceptance is deterministic and guarantees the speculative output is bit-for-bit
+identical to target-only greedy generation — making the 95% token match threshold
+verifiable and reproducible without seed management.
+
 ```
 For each round:
-  1. Draft model proposes K tokens: x_1, x_2, ..., x_K
+  1. Draft model greedily proposes K tokens: x_1, x_2, ..., x_K  (argmax at each step)
   2. Target model scores all K+1 positions in ONE forward pass
   3. For each draft token x_i:
-       p_accept = min(1, p_target(x_i) / p_draft(x_i))
-       if uniform() <= p_accept: accept
-       else: resample from normalize(max(0, p_target - p_draft)), stop round
-  4. If all K accepted: sample one bonus token from target
+       if target_argmax(context, position i) == x_i: accept, continue
+       else: take target's greedy choice, stop round
+  4. If all K accepted: take one free bonus token from target (K+1 tokens per call)
 ```
 
 **Reference:** Leviathan, Y., Kalman, M., & Matias, Y. (2023). *Fast Inference from Transformers via Speculative Decoding.* ICML 2023. [arxiv.org/abs/2211.17192](https://arxiv.org/abs/2211.17192)

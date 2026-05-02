@@ -1,4 +1,10 @@
-"""Generates 100 diverse eval prompts and saves to data/eval_prompts.txt"""
+"""
+Generates development prompts for local smoke testing and debugging.
+
+NOTE: These are NOT the prompts used by the judge. The judge embeds its own
+prompt set directly in judge/judge.py to prevent the LLM agent from reading
+them and hardcoding outputs. This file is for local development only.
+"""
 
 prompts = [
     # Geography

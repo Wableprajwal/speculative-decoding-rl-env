@@ -34,12 +34,15 @@ def test_deterministic_with_same_seed():
     assert out1 == out2, "Output is not deterministic with the same seed."
 
 
-def test_different_seeds_differ():
-    """Different seeds should (almost always) produce different output."""
+def test_deterministic_regardless_of_seed():
+    """Greedy decoding is fully deterministic — seed has no effect on output."""
     prompt = "The universe began"
     out1 = speculative_decode(prompt, max_new_tokens=20, K=4, seed=1)
     out2 = speculative_decode(prompt, max_new_tokens=20, K=4, seed=99)
-    assert out1 != out2, "Different seeds produced identical output (very unlikely if correct)."
+    assert out1 == out2, (
+        "Greedy decoding should produce identical output regardless of seed. "
+        "If outputs differ, multinomial sampling may have been introduced."
+    )
 
 
 def test_generates_correct_token_count():

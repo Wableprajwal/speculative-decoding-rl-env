@@ -5,16 +5,24 @@ Evaluates a candidate implementation at /solution/speculative_decoding.py
 
 Scoring
 -------
-  FAIL  -> score 0.0    (hard failure: missing file, wrong signature, crash)
+  FAIL  -> score 0.0    (hard failure: missing file, wrong signature, crash,
+                          correctness below threshold, speedup out of range)
   PASS  -> continuous score in [0, 1] based on correctness + speedup
 
 Steps
 -----
-  1. Check file exists
-  2. Check import + function signature
-  3. Correctness: token match rate >= 95% on hidden eval prompts
-  4. Speed: wall-clock speedup >= 1.5x vs baseline (use --local for 1.05x on CPU)
+  1. Check file exists + correct function signature
+  2. Correctness: token match rate >= 95% vs greedy target-only baseline
+  3. Speed: wall-clock speedup >= 1.5x vs baseline (use --local for 1.05x on CPU)
+  4. Sanity: speedup <= 50x (flags output caching / hardcoded lookup tables)
   5. Compute continuous score
+
+Note on eval prompts
+--------------------
+Prompts are embedded directly in this file rather than stored in a separate
+data file. In deployment the judge runs in a restricted VM directory that the
+LLM agent cannot read, preventing the agent from precomputing and caching
+outputs for known prompts.
 """
 
 import sys
@@ -25,12 +33,79 @@ import inspect
 import argparse
 
 SOLUTION_PATH   = os.getenv("SOLUTION_PATH", "solution/speculative_decoding.py")
-EVAL_PROMPTS    = os.getenv("EVAL_PROMPTS",  "data/eval_prompts.txt")
 MAX_NEW_TOKENS  = 50
 K               = 4
 SEED            = 42
 MATCH_THRESHOLD = 0.95
-SPEEDUP_MAX     = 3.0
+SPEEDUP_MIN_DEFAULT = 1.5
+SPEEDUP_MAX_SCORE   = 3.0
+SPEEDUP_SANITY      = 50.0   # above this strongly suggests output caching
+
+# ---------------------------------------------------------------------------
+# Eval prompts — embedded here so the LLM agent cannot read them from a file.
+# ---------------------------------------------------------------------------
+_EVAL_PROMPTS = [
+    # Geography
+    "The capital of France is", "The longest river in Africa is",
+    "The highest mountain in the world is", "The capital of Japan is",
+    "The Amazon rainforest is located in", "The Sahara Desert spans across",
+    "The capital of Australia is", "The Pacific Ocean is the",
+    "The capital of Brazil is", "The Nile River flows through",
+    # Science
+    "The speed of light is approximately", "Photosynthesis is the process by which",
+    "The human body contains approximately", "The periodic table was invented by",
+    "DNA stands for", "The theory of evolution was proposed by",
+    "The boiling point of water at sea level is", "Gravity was described by",
+    "The smallest unit of matter is", "The Big Bang theory states that",
+    # History
+    "The French Revolution began in", "World War II ended in",
+    "The first moon landing occurred in", "The Roman Empire fell in",
+    "The printing press was invented by", "The Declaration of Independence was signed in",
+    "The Renaissance period began in", "The Cold War lasted from",
+    "The Berlin Wall fell in", "The first computer was built in",
+    # Technology
+    "The first programming language was", "The internet was invented in",
+    "Artificial intelligence refers to", "Machine learning is a subset of",
+    "The Python programming language was created by", "The first iPhone was released in",
+    "Cloud computing refers to", "The Linux kernel was created by",
+    "Blockchain technology was first described in", "The transistor was invented in",
+    # Math
+    "The square root of 144 is", "Pi is approximately equal to",
+    "The Fibonacci sequence begins with", "A prime number is defined as",
+    "The Pythagorean theorem states that", "Calculus was invented by",
+    "The value of Euler's number e is approximately", "A quadratic equation has the form",
+    "The sum of angles in a triangle is", "Binary number system uses only",
+    # Story starters
+    "On a cold winter morning,", "The old lighthouse stood at the edge of",
+    "She had never seen anything like it before,", "The last train left the station at",
+    "Deep in the forest, there was a", "The scientist stared at the results and",
+    "After ten years away,", "The message arrived at midnight,",
+    "No one expected the discovery of", "The robot looked up and said,",
+    # Nature
+    "The migration of birds is triggered by", "Coral reefs are important because",
+    "The water cycle consists of", "Volcanoes form when",
+    "Earthquakes are caused by", "The Amazon produces approximately",
+    "Polar ice caps are melting because", "The ozone layer protects Earth from",
+    "Hurricanes form over", "Bioluminescence is the ability of",
+    # Economics
+    "Inflation refers to the", "The stock market is a place where",
+    "Gross domestic product measures", "Supply and demand determines",
+    "A recession is defined as", "Central banks control",
+    "Cryptocurrency is a form of", "The gold standard refers to",
+    "Free trade agreements allow", "Microeconomics focuses on",
+    # Medicine
+    "The human immune system protects", "Antibiotics are used to treat",
+    "The heart pumps blood through", "Vaccines work by",
+    "The nervous system is responsible for", "Cancer occurs when",
+    "Mental health refers to", "The digestive system breaks down",
+    "Genetics is the study of", "The placebo effect occurs when",
+    # Space
+    "The Milky Way galaxy contains", "Black holes are formed when",
+    "The International Space Station orbits", "Mars is known as",
+    "The speed required to escape Earth's gravity is", "Neutron stars are created when",
+    "The James Webb Space Telescope can observe", "Solar flares are caused by",
+    "The nearest star to Earth is", "Dark matter makes up approximately",
+]
 
 
 def fail(reason: str):
@@ -71,20 +146,10 @@ def load_baseline():
     return module.baseline_decode
 
 
-def load_prompts():
-    if not os.path.isfile(EVAL_PROMPTS):
-        fail(f"Eval prompts not found: {EVAL_PROMPTS}. Run: python data/generate_eval_prompts.py")
-    with open(EVAL_PROMPTS) as f:
-        prompts = [l.strip() for l in f if l.strip()]
-    if len(prompts) < 10:
-        fail("Eval prompts file has fewer than 10 prompts.")
-    return prompts
-
-
-def run_judge(speedup_min: float = 1.5):
+def run_judge(speedup_min: float = SPEEDUP_MIN_DEFAULT):
     print("=" * 60)
     print("Speculative Decoding Environment — Judge")
-    print(f"Speedup threshold: {speedup_min}x")
+    print(f"Speedup threshold: {speedup_min}x  |  Sanity cap: {SPEEDUP_SANITY}x")
     print("=" * 60)
 
     print("\n[1/4] Checking file and function signature...")
@@ -95,7 +160,7 @@ def run_judge(speedup_min: float = 1.5):
     baseline_fn = load_baseline()
     print("      OK")
 
-    prompts = load_prompts()
+    prompts = _EVAL_PROMPTS
     print(f"\n[3/4] Evaluating on {len(prompts)} prompts...")
 
     from transformers import GPT2Tokenizer
@@ -140,20 +205,24 @@ def run_judge(speedup_min: float = 1.5):
 
     print(f"\n[4/4] Final results:")
     print(f"      Token match rate : {match_rate:.4f}  (threshold >= {MATCH_THRESHOLD})")
-    print(f"      Speedup          : {speedup:.2f}x   (threshold >= {speedup_min}x)")
+    print(f"      Speedup          : {speedup:.2f}x   (range: >= {speedup_min}x, <= {SPEEDUP_SANITY}x)")
     print(f"      Baseline time    : {t_base:.1f}s")
     print(f"      Candidate time   : {t_cand:.1f}s")
 
     if match_rate < MATCH_THRESHOLD:
         fail(f"Correctness check failed: {match_rate:.4f} < {MATCH_THRESHOLD}. "
-             f"Check your rejection sampling math.")
+             f"Output does not match greedy target-only generation.")
 
     if speedup < speedup_min:
         fail(f"Speed check failed: {speedup:.2f}x < {speedup_min}x. "
-             f"Ensure target model is called ONCE per K-token round.")
+             f"Ensure the target model is called ONCE per K-token round.")
+
+    if speedup > SPEEDUP_SANITY:
+        fail(f"Sanity check failed: {speedup:.1f}x > {SPEEDUP_SANITY}x. "
+             f"Suspiciously fast — output caching or hardcoded results detected.")
 
     correctness_score = min(1.0, max(0.0, (match_rate - MATCH_THRESHOLD) / (1.0 - MATCH_THRESHOLD)))
-    speedup_score     = min(1.0, max(0.0, (speedup - speedup_min) / (SPEEDUP_MAX - speedup_min)))
+    speedup_score     = min(1.0, max(0.0, (speedup - speedup_min) / (SPEEDUP_MAX_SCORE - speedup_min)))
     final_score       = 0.6 * correctness_score + 0.4 * speedup_score
 
     print(f"\n{'='*60}")
@@ -170,4 +239,4 @@ if __name__ == "__main__":
     parser.add_argument("--local", action="store_true",
                         help="Lower speedup threshold to 1.05x for CPU/local testing")
     args = parser.parse_args()
-    run_judge(speedup_min=1.05 if args.local else 1.5)
+    run_judge(speedup_min=1.05 if args.local else SPEEDUP_MIN_DEFAULT)
