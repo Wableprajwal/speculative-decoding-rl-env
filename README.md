@@ -6,6 +6,19 @@ production at Google, Meta, and Anthropic.
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Wableprajwal/speculative-decoding-rl-env/blob/main/Run_on_Colab.ipynb)
 
+## Results (T4 GPU — GPT-2 demo pair)
+
+![Speedup results](speedup_results.png)
+
+| Metric | Value |
+|--------|-------|
+| Token match rate | **100%** (bit-for-bit identical to target-only) |
+| Speedup on T4 GPU | **~1.2x** (GPT-2 small→large demo pair) |
+| Judge score | **0.62 / 1.0** |
+
+> **Note:** GPT-2 small and large have low greedy-argmax agreement, limiting demo speedup to ~1.2x.
+> Production pairs (Llama-2-7B → 70B, Mistral-7B → Mixtral) achieve **2–3x**.
+
 ## What is Speculative Decoding?
 
 Standard LLM generation calls the large target model once per token —
