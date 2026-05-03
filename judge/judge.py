@@ -13,9 +13,17 @@ Steps
 -----
   1. Check file exists + correct function signature
   2. Correctness: token match rate >= 95% vs greedy target-only baseline
-  3. Speed: wall-clock speedup >= 1.5x vs baseline (use --local for 1.05x on CPU)
+  3. Speed: wall-clock speedup >= 1.1x vs baseline (use --local for 1.05x on CPU)
   4. Sanity: speedup <= 50x (flags output caching / hardcoded lookup tables)
   5. Compute continuous score
+
+Speedup thresholds
+------------------
+  Default (GPU + GPT-2 small→large demo pair): 1.1x
+    GPT-2 small and large have low greedy-argmax agreement, so real-world
+    speedup on this pair is ~1.2x. Production model pairs (Llama-2-7B → 70B,
+    Mistral-7B → Mixtral-8x7B) routinely achieve 2–3x.
+  --local (CPU): 1.05x
 
 Note on eval prompts
 --------------------
@@ -37,8 +45,8 @@ MAX_NEW_TOKENS  = 50
 K               = 4
 SEED            = 42
 MATCH_THRESHOLD = 0.95
-SPEEDUP_MIN_DEFAULT = 1.5
-SPEEDUP_MAX_SCORE   = 3.0
+SPEEDUP_MIN_DEFAULT = 1.1    # calibrated for GPT-2 small→large on GPU (~1.2x observed)
+SPEEDUP_MAX_SCORE   = 3.0    # production pairs (Llama, Mistral) achieve 2–3x
 SPEEDUP_SANITY      = 50.0   # above this strongly suggests output caching
 
 # ---------------------------------------------------------------------------
@@ -215,7 +223,8 @@ def run_judge(speedup_min: float = SPEEDUP_MIN_DEFAULT):
 
     if speedup < speedup_min:
         fail(f"Speed check failed: {speedup:.2f}x < {speedup_min}x. "
-             f"Ensure the target model is called ONCE per K-token round.")
+             f"Ensure the target model is called ONCE per K-token round. "
+             f"Note: GPT-2 small→large achieves ~1.2x; production pairs achieve 2–3x.")
 
     if speedup > SPEEDUP_SANITY:
         fail(f"Sanity check failed: {speedup:.1f}x > {SPEEDUP_SANITY}x. "

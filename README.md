@@ -90,12 +90,12 @@ def speculative_decode(
 | 1 | File exists | `/solution/speculative_decoding.py` missing |
 | 2 | Import + signature | Import error or wrong parameters |
 | 3 | Correctness | Token match rate < 95% on 100 prompts embedded in judge |
-| 4 | Speed | Speedup < 1.5× vs. baseline |
+| 4 | Speed | Speedup < 1.1× vs. baseline (GPT-2 demo pair); production pairs (Llama, Mistral) achieve 2–3× |
 
 **Continuous score (if all checks pass):**
 ```python
 correctness_score = (match_rate - 0.95) / 0.05   # 0.95→0.0, 1.00→1.0
-speedup_score     = (speedup - 1.5) / 1.5         # 1.5x→0.0, 3.0x→1.0
+speedup_score     = (speedup - 1.1) / 1.9         # 1.1x→0.0, 3.0x→1.0
 final_score       = 0.6 * correctness_score + 0.4 * speedup_score
 ```
 
